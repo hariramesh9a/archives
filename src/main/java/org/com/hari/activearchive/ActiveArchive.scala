@@ -18,9 +18,9 @@ object ActiveArchive {
     val tableName = args(3)
     val partName = args(4)
     val loadEvent: String = args(5)
-    val tblPath = "/user/hive/" + projectName + "/" + tableName + "/" 
+    val tblPath = "/user/ramesh2/" + projectName + "/" + tableName + "/" 
     val opPath = tblPath + partName + "/" + loadEvent+"/"
-    val conf = new SparkConf().setAppName("Active Archive").setMaster("local[4]")
+    val conf = new SparkConf().setAppName("Active Archive")
     val sc = new SparkContext(conf)
     val sqlCont = new HiveContext(sc)
     val delimiter = getDelimiter(modelFile)
@@ -30,7 +30,6 @@ object ActiveArchive {
       .option("delimiter", delimiter)
       .option("header", headerOption)
       .option("treatEmptyValuesAsNulls", "true")
-      .option("ignoreTrailingWhiteSpace", "true")
       .schema(schema)
       .load(dataFile)
     val addLoadEventID = udf { (LoadEventId: String) => loadEvent }
