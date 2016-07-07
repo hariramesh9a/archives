@@ -18,7 +18,7 @@ object ActiveArchive {
     val tableName = args(3)
     val partName = args(4)
     val loadEvent: String = args(5)
-    val tblPath = "/user/ramesh2/" + projectName + "/" + tableName + "/" 
+    val tblPath = "/tmp/ramesh2/" + projectName + "/" + tableName + "/" 
     val opPath = tblPath + partName + "/" + loadEvent+"/"
     val conf = new SparkConf().setAppName("Active Archive")
     val sc = new SparkContext(conf)
@@ -47,13 +47,11 @@ object ActiveArchive {
     val dbString = "CREATE  DATABASE IF NOT EXISTS " + projectName
     sqlCont.sql(dbString)
     sqlCont.sql("use " + projectName)
-    val tblString = "CREATE TABLE IF NOT EXISTS " + tableName + "(" + formattedColString + ")PARTITIONED BY(batchdate STRING, loadeventid STRING) STORED AS PARQUET LOCATION '"+tblPath+"'" 
+    val tblString = "CREATE EXTERNAL TABLE IF NOT EXISTS " + tableName + "(" + formattedColString + ")PARTITIONED BY(batchdate STRING, loadeventid STRING) STORED AS PARQUET LOCATION '"+tblPath+"'" 
     sqlCont.sql(tblString)
     myData.write.mode("overwrite").parquet(opPath)
     val partString = "ALTER TABLE " + tableName + " ADD IF NOT EXISTS PARTITION (batchdate='" + partName + "', loadeventid='" + loadEvent + "') location '" + opPath + "'"
-   sqlCont.sql(partString)    
-    val addPartString="LOAD DATA LOCAL INPATH '"+opPath+"' OVERWRITE INTO TABLE "+tableName+" PARTITION (batchdate='" + partName + "', loadeventid='" + loadEvent + "')"
-    sqlCont.sql(addPartString) 
+    sqlCont.sql(partString)    
     val hiveQL = sqlCont.read.table(tableName)
     hiveQL.show()
     println(hiveQL.count())
