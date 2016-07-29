@@ -2,6 +2,7 @@ package org.com.hari.activearchive
 import org.apache.spark.SparkContext
 import org.apache.spark.sql.{ Row, SQLContext }
 import org.apache.spark.sql.hive.HiveContext
+import org.apache.spark.sql.types._
 import org.apache.spark.sql.types.{ StructType, DateType, StringType, StructField, DoubleType }
 import org.apache.spark.SparkConf
 import scala.io.Source
@@ -13,6 +14,10 @@ import java.io.InputStream
 import org.apache.hadoop.conf._
 import org.apache.hadoop.fs._
 import org.apache.hadoop.fs.permission.FsPermission
+import scala.reflect.runtime.universe._
+import scala.reflect.runtime.currentMirror
+import scala.tools.reflect.ToolBox
+
 object ActiveArchive {
   private val conf = new Configuration()
   private val hdfsCoreSitePath = new Path("core-site.xml")
@@ -33,56 +38,42 @@ object ActiveArchive {
     val partName = args(5)
     val loadEvent: String = args(6)
     val compress: String = args(7)
-    val tblPath = hadoopRoot + "/" + tableName 
-    val batchPath = tblPath + "/" + partName 
+    val tblPath = hadoopRoot + "/" + tableName
+    val batchPath = tblPath + "/" + partName
     val opPath = batchPath + "/" + loadEvent
     val conf = new SparkConf().setAppName("Active Archive")
     val sc = new SparkContext(conf)
-    val sqlCont = new HiveContext(sc)
-    val delimiter = getDelimiter(modelFile, sc)
-    val headerOption = getHeaderOption(modelFile, sc)
-    val schema = getSchema(modelFile, sc)
-    val myData = sqlCont.read.format("com.databricks.spark.csv")
-      .option("delimiter", delimiter)
-      .option("header", headerOption)
-      .option("treatEmptyValuesAsNulls", "true")
-      .schema(schema)
-      .load(dataFile)
-    val addLoadEventID = udf { (LoadEventId: String) => loadEvent }
-    val addBatchDate = udf { (BatchDate: String) => partName }
-    var colString: String = ""
-    schema.foreach { x =>
-      colString += x.name + " " + x.dataType.typeName + ","
-    }
-    val formattedColString = colString.dropRight(1)
     mkdirs(tblPath)
     chmod(tblPath)
     mkdirs(batchPath)
     chmod(batchPath)
     mkdirs(opPath)
     chmod(opPath)
-    val dbString = "CREATE  DATABASE IF NOT EXISTS " + dbName
-    sqlCont.sql(dbString)
-    sqlCont.sql("use " + dbName)
+    val sqlCont = new HiveContext(sc)
+    val delimiter = getDelimiter(modelFile, sc)
+    val schema = getSchema(modelFile, sc)
+    var colString: String = ""
+    schema.foreach { x =>
+      colString += x.name + " " + x.dataType.typeName + ","
+    }
+    val formattedColString = colString.dropRight(1)
     var tblString = "";
     if (compress == "Y") {
       tblString = "CREATE EXTERNAL TABLE IF NOT EXISTS " + tableName + "(" + formattedColString + ")PARTITIONED BY(batchdate STRING, loadeventid STRING) STORED AS PARQUET LOCATION '" + tblPath + "'"
-      myData.write.mode("overwrite").parquet(opPath)
     } else {
       tblString = "CREATE EXTERNAL TABLE IF NOT EXISTS " + tableName + "(" + formattedColString + ")PARTITIONED BY(batchdate STRING, loadeventid STRING) ROW FORMAT DELIMITED FIELDS TERMINATED BY '" + delimiter + "' STORED AS TEXTFILE LOCATION '" + tblPath + "'"
-      myData.write.mode("overwrite").format("com.databricks.spark.csv")
-        .option("header", headerOption)
-        .option("delimiter", delimiter)
-        .save(opPath)
     }
-    chmod(tblPath)
-    chmod(batchPath)
-    chmod(opPath)
+    val dbString = "CREATE  DATABASE IF NOT EXISTS " + dbName
+    sqlCont.sql(dbString)
+    sqlCont.sql("use " + dbName)
     sqlCont.sql(tblString)
-    val dropString = "ALTER TABLE " + tableName + " DROP IF EXISTS PARTITION (batchdate='" + partName + "', loadeventid='" + loadEvent + "')"
-    sqlCont.sql(dropString)
-    val partString = "ALTER TABLE " + tableName + " ADD IF NOT EXISTS PARTITION (batchdate='" + partName + "', loadeventid='" + loadEvent + "') location '" + opPath + "'"
-    sqlCont.sql(partString)
+    if (delimiter != "F") {
+      dealDelimited(sc, sqlCont, modelFile, dataFile, delimiter, loadEvent, partName, compress, tblPath, opPath, batchPath, tableName, formattedColString)
+    } else {
+      //fixed width file will be converted to RDD and then to Parquet file 
+      dealFixedWidth(sc, sqlCont, modelFile, dataFile, delimiter, loadEvent, partName, compress, tblPath, opPath, batchPath, tableName, formattedColString)
+      //eof fixed width file
+    }
     sc.stop()
   }
 
@@ -125,6 +116,55 @@ object ActiveArchive {
     }
     println("Schema inferred is: " + schema)
     return schema
+  }
+
+  def dealDelimited(sc: SparkContext, sqlCont: HiveContext, modelFileName: String, dataFile: String, delimiter: String, loadEvent: String,
+    partName: String, compress: String, tblPath: String, opPath: String, batchPath: String, tableName: String, formattedColString: String): Unit = {
+    val headerOption = getHeaderOption(modelFileName, sc)
+    val schema = getSchema(modelFileName, sc)
+    val myData = sqlCont.read.format("com.databricks.spark.csv")
+      .option("delimiter", delimiter)
+      .option("header", headerOption)
+      .option("treatEmptyValuesAsNulls", "true")
+      .schema(schema)
+      .load(dataFile)
+
+    if (compress == "Y") {
+      myData.write.mode("overwrite").parquet(opPath)
+    } else {
+      myData.write.mode("overwrite").format("com.databricks.spark.csv")
+        .option("header", headerOption)
+        .option("delimiter", delimiter)
+        .save(opPath)
+    }
+    chmod(tblPath)
+    chmod(batchPath)
+    chmod(opPath)
+    val dropString = "ALTER TABLE " + tableName + " DROP IF EXISTS PARTITION (batchdate='" + partName + "', loadeventid='" + loadEvent + "')"
+    sqlCont.sql(dropString)
+    val partString = "ALTER TABLE " + tableName + " ADD IF NOT EXISTS PARTITION (batchdate='" + partName + "', loadeventid='" + loadEvent + "') location '" + opPath + "'"
+    sqlCont.sql(partString)
+
+  }
+
+  def dealFixedWidth(sc: SparkContext, sqlCont: HiveContext, modelFileName: String, dataFile: String, delimiter: String, loadEvent: String,
+    partName: String, compress: String, tblPath: String, opPath: String, batchPath: String, tableName: String, formattedColString: String): Unit = {
+    val headerOption = getHeaderOption(modelFileName, sc)
+    val schema = getSchema(modelFileName, sc)
+    val myData = sc.textFile(dataFile)
+    val myModel = sc.textFile(modelFileName)
+    val strin = myModel.take(4).last
+    val rowRDD = myData.map { x => Row.fromSeq(strin.split(":").map { field => x.substring(field.split(",")(0).toInt, field.split(",")(1).toInt) }.toSeq) }
+    val tableDF = sqlCont.createDataFrame(rowRDD, schema)
+    tableDF.write.mode("overwrite").parquet(opPath)
+    chmod(tblPath)
+    chmod(batchPath)
+    chmod(opPath)
+    val dropString = "ALTER TABLE " + tableName + " DROP IF EXISTS PARTITION (batchdate='" + partName + "', loadeventid='" + loadEvent + "')"
+    sqlCont.sql(dropString)
+    val partString = "ALTER TABLE " + tableName + " ADD IF NOT EXISTS PARTITION (batchdate='" + partName + "', loadeventid='" + loadEvent + "') location '" + opPath + "'"
+    sqlCont.sql(partString)
+
   }
 
   def chmod(folderPath: String): Unit = {
